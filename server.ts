@@ -1050,16 +1050,66 @@ function sentinelGatewayMiddleware(req: Request, res: Response, next: NextFuncti
 // Authentication APIs (Real Backend Auth for Sentinel & Protected API)
 // ---------------------------------------------------------------------------
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) {
     res.status(400).json({ error: 'Email and password are required' });
     return;
   }
 
-  const record = userAccounts.get(email.toLowerCase());
+  const lowerEmail = email.toLowerCase().trim();
+
+  // 1. If Supabase is configured, authenticate against Supabase Auth
+  if (supabaseClient) {
+    try {
+      const { data: sbData, error: sbError } = await supabaseClient.auth.signInWithPassword({
+        email: lowerEmail,
+        password,
+      });
+
+      if (!sbError && sbData?.user) {
+        const role = (sbData.user.user_metadata?.role as any) || 'analyst';
+        const fullName = sbData.user.user_metadata?.full_name || lowerEmail.split('@')[0];
+        const org = sbData.user.user_metadata?.organization || 'Security Operations Center';
+
+        const account: UserAccount = {
+          id: sbData.user.id,
+          email: sbData.user.email || lowerEmail,
+          fullName,
+          role,
+          organization: org,
+          createdAt: sbData.user.created_at,
+        };
+
+        const sessionToken = sbData.session?.access_token || ('tok-' + Math.random().toString(36).substring(2) + Date.now());
+        activeAuthTokens.set(sessionToken, account);
+
+        auditLogs.unshift({
+          id: 'audit-' + Math.random().toString(36).substring(2, 9),
+          timestamp: new Date().toISOString(),
+          actor: account.email,
+          role: account.role,
+          action: 'USER_LOGIN',
+          details: `User ${account.fullName} authenticated via Supabase Auth as ${account.role}.`,
+          target: account.id,
+        });
+
+        res.json({
+          status: 'success',
+          token: sessionToken,
+          user: account,
+        });
+        return;
+      }
+    } catch (err) {
+      console.warn('[Supabase Auth Login Check]:', err);
+    }
+  }
+
+  // 2. Fallback check against in-memory security accounts
+  const record = userAccounts.get(lowerEmail);
   if (!record || record.passwordHash !== password) {
-    res.status(401).json({ error: 'Invalid credentials or user does not exist' });
+    res.status(401).json({ error: 'Invalid credentials. Please check your email and password.' });
     return;
   }
 
@@ -1083,14 +1133,81 @@ app.post('/api/auth/login', (req, res) => {
   });
 });
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { email, password, fullName, organization } = req.body || {};
   if (!email || !password || !fullName) {
     res.status(400).json({ error: 'Name, email, and password are required' });
     return;
   }
 
-  const lowerEmail = email.toLowerCase();
+  const lowerEmail = email.toLowerCase().trim();
+
+  // 1. If Supabase is configured, create the user in Supabase Auth via admin API (instant verification without SMTP rate limits)
+  if (supabaseClient) {
+    try {
+      const { data: sbData, error: sbError } = await supabaseClient.auth.admin.createUser({
+        email: lowerEmail,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          full_name: fullName,
+          organization: organization || 'Security Operations Center',
+          role: 'analyst',
+        },
+      });
+
+      if (sbError) {
+        const errorMsg = sbError.message.toLowerCase();
+        if (errorMsg.includes('already registered') || errorMsg.includes('already exists')) {
+          return res.status(400).json({ error: 'An account with this email already exists' });
+        }
+        return res.status(400).json({ error: sbError.message });
+      }
+
+      if (sbData?.user) {
+        const newAccount: UserAccount = {
+          id: sbData.user.id,
+          email: lowerEmail,
+          fullName,
+          role: 'analyst',
+          organization: organization || 'Security Operations Center',
+          createdAt: sbData.user.created_at,
+        };
+
+        // Authenticate new user session immediately
+        let sessionToken = 'tok-' + Math.random().toString(36).substring(2) + Date.now();
+        const { data: loginData } = await supabaseClient.auth.signInWithPassword({
+          email: lowerEmail,
+          password,
+        });
+        if (loginData?.session?.access_token) {
+          sessionToken = loginData.session.access_token;
+        }
+
+        activeAuthTokens.set(sessionToken, newAccount);
+        userAccounts.set(lowerEmail, { account: newAccount, passwordHash: password });
+
+        auditLogs.unshift({
+          id: 'audit-' + Math.random().toString(36).substring(2, 9),
+          timestamp: new Date().toISOString(),
+          actor: newAccount.email,
+          role: newAccount.role,
+          action: 'USER_REGISTERED',
+          details: `New operator account created in Supabase Auth for ${fullName} (${organization || 'SOC'}).`,
+          target: newAccount.id,
+        });
+
+        return res.status(201).json({
+          status: 'created',
+          token: sessionToken,
+          user: newAccount,
+        });
+      }
+    } catch (err: any) {
+      console.warn('[Supabase Auth Sign Up Check]:', err?.message);
+    }
+  }
+
   if (userAccounts.has(lowerEmail)) {
     res.status(400).json({ error: 'An account with this email already exists' });
     return;
@@ -1100,7 +1217,7 @@ app.post('/api/auth/register', (req, res) => {
     id: 'usr-' + Math.random().toString(36).substring(2, 8),
     email: lowerEmail,
     fullName,
-    role: 'analyst', // Default role for new signups
+    role: 'analyst',
     organization: organization || 'Security Operations Center',
     createdAt: new Date().toISOString(),
   };
@@ -1130,12 +1247,20 @@ app.post('/api/auth/register', (req, res) => {
   });
 });
 
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.replace('Bearer ', '');
+  if (token) {
+    activeAuthTokens.delete(token);
+  }
+  res.json({ status: 'logged_out' });
+});
+
 app.get('/api/auth/me', (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace('Bearer ', '');
   if (!token || !activeAuthTokens.has(token)) {
-    // Return default admin account if not authenticated
-    res.json({ user: userAccounts.get('admin@sentinel.internal')?.account });
+    res.status(401).json({ error: 'Unauthorized: No active session' });
     return;
   }
   res.json({ user: activeAuthTokens.get(token) });

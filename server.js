@@ -23538,15 +23538,56 @@ function sentinelGatewayMiddleware(req, res, next) {
   };
   next();
 }
-app.post("/api/auth/login", (req, res) => {
+app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) {
     res.status(400).json({ error: "Email and password are required" });
     return;
   }
-  const record = userAccounts.get(email.toLowerCase());
+  const lowerEmail = email.toLowerCase().trim();
+  if (supabaseClient) {
+    try {
+      const { data: sbData, error: sbError } = await supabaseClient.auth.signInWithPassword({
+        email: lowerEmail,
+        password
+      });
+      if (!sbError && sbData?.user) {
+        const role = sbData.user.user_metadata?.role || "analyst";
+        const fullName = sbData.user.user_metadata?.full_name || lowerEmail.split("@")[0];
+        const org = sbData.user.user_metadata?.organization || "Security Operations Center";
+        const account = {
+          id: sbData.user.id,
+          email: sbData.user.email || lowerEmail,
+          fullName,
+          role,
+          organization: org,
+          createdAt: sbData.user.created_at
+        };
+        const sessionToken = sbData.session?.access_token || "tok-" + Math.random().toString(36).substring(2) + Date.now();
+        activeAuthTokens.set(sessionToken, account);
+        auditLogs.unshift({
+          id: "audit-" + Math.random().toString(36).substring(2, 9),
+          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+          actor: account.email,
+          role: account.role,
+          action: "USER_LOGIN",
+          details: `User ${account.fullName} authenticated via Supabase Auth as ${account.role}.`,
+          target: account.id
+        });
+        res.json({
+          status: "success",
+          token: sessionToken,
+          user: account
+        });
+        return;
+      }
+    } catch (err) {
+      console.warn("[Supabase Auth Login Check]:", err);
+    }
+  }
+  const record = userAccounts.get(lowerEmail);
   if (!record || record.passwordHash !== password) {
-    res.status(401).json({ error: "Invalid credentials or user does not exist" });
+    res.status(401).json({ error: "Invalid credentials. Please check your email and password." });
     return;
   }
   const token = "tok-" + Math.random().toString(36).substring(2) + Date.now();
@@ -23566,13 +23607,70 @@ app.post("/api/auth/login", (req, res) => {
     user: record.account
   });
 });
-app.post("/api/auth/register", (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
   const { email, password, fullName, organization } = req.body || {};
   if (!email || !password || !fullName) {
     res.status(400).json({ error: "Name, email, and password are required" });
     return;
   }
-  const lowerEmail = email.toLowerCase();
+  const lowerEmail = email.toLowerCase().trim();
+  if (supabaseClient) {
+    try {
+      const { data: sbData, error: sbError } = await supabaseClient.auth.admin.createUser({
+        email: lowerEmail,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          full_name: fullName,
+          organization: organization || "Security Operations Center",
+          role: "analyst"
+        }
+      });
+      if (sbError) {
+        const errorMsg = sbError.message.toLowerCase();
+        if (errorMsg.includes("already registered") || errorMsg.includes("already exists")) {
+          return res.status(400).json({ error: "An account with this email already exists" });
+        }
+        return res.status(400).json({ error: sbError.message });
+      }
+      if (sbData?.user) {
+        const newAccount2 = {
+          id: sbData.user.id,
+          email: lowerEmail,
+          fullName,
+          role: "analyst",
+          organization: organization || "Security Operations Center",
+          createdAt: sbData.user.created_at
+        };
+        let sessionToken = "tok-" + Math.random().toString(36).substring(2) + Date.now();
+        const { data: loginData } = await supabaseClient.auth.signInWithPassword({
+          email: lowerEmail,
+          password
+        });
+        if (loginData?.session?.access_token) {
+          sessionToken = loginData.session.access_token;
+        }
+        activeAuthTokens.set(sessionToken, newAccount2);
+        userAccounts.set(lowerEmail, { account: newAccount2, passwordHash: password });
+        auditLogs.unshift({
+          id: "audit-" + Math.random().toString(36).substring(2, 9),
+          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+          actor: newAccount2.email,
+          role: newAccount2.role,
+          action: "USER_REGISTERED",
+          details: `New operator account created in Supabase Auth for ${fullName} (${organization || "SOC"}).`,
+          target: newAccount2.id
+        });
+        return res.status(201).json({
+          status: "created",
+          token: sessionToken,
+          user: newAccount2
+        });
+      }
+    } catch (err) {
+      console.warn("[Supabase Auth Sign Up Check]:", err?.message);
+    }
+  }
   if (userAccounts.has(lowerEmail)) {
     res.status(400).json({ error: "An account with this email already exists" });
     return;
@@ -23582,7 +23680,6 @@ app.post("/api/auth/register", (req, res) => {
     email: lowerEmail,
     fullName,
     role: "analyst",
-    // Default role for new signups
     organization: organization || "Security Operations Center",
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
@@ -23607,11 +23704,19 @@ app.post("/api/auth/register", (req, res) => {
     user: newAccount
   });
 });
+app.post("/api/auth/logout", (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.replace("Bearer ", "");
+  if (token) {
+    activeAuthTokens.delete(token);
+  }
+  res.json({ status: "logged_out" });
+});
 app.get("/api/auth/me", (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace("Bearer ", "");
   if (!token || !activeAuthTokens.has(token)) {
-    res.json({ user: userAccounts.get("admin@sentinel.internal")?.account });
+    res.status(401).json({ error: "Unauthorized: No active session" });
     return;
   }
   res.json({ user: activeAuthTokens.get(token) });

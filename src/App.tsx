@@ -10,8 +10,7 @@ import { StorefrontTab } from './components/StorefrontTab';
 import { AuditLogsTab } from './components/AuditLogsTab';
 import { IncidentDetailModal } from './components/IncidentDetailModal';
 import { LandingPage } from './components/LandingPage';
-import { LoginPage } from './components/LoginPage';
-import { RegisterPage } from './components/RegisterPage';
+import { AuthPage } from './components/AuthPage';
 import { DistributedPatternsTab } from './components/DistributedPatternsTab';
 import { RelationshipGraphTab } from './components/RelationshipGraphTab';
 import { BackendApiTab } from './components/BackendApiTab';
@@ -31,6 +30,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [selectedThreat, setSelectedThreat] = useState<ThreatEvent | null>(null);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
 
   // Sync browser back/forward buttons (popstate)
   useEffect(() => {
@@ -78,13 +78,31 @@ export default function App() {
           if (data && data.user) {
             setCurrentUser(data.user);
             setActiveRole(data.user.role);
+          } else {
+            localStorage.removeItem('sentinel_auth_token');
+            setCurrentUser(null);
           }
         })
         .catch(() => {
           localStorage.removeItem('sentinel_auth_token');
+          setCurrentUser(null);
+        })
+        .finally(() => {
+          setIsAuthChecking(false);
         });
+    } else {
+      setIsAuthChecking(false);
     }
   }, [setActiveRole]);
+
+  // Route guard: Redirect unauthenticated requests to /console to /auth
+  useEffect(() => {
+    if (!isAuthChecking) {
+      if (currentPath === '/console' && !currentUser) {
+        navigateTo('/auth');
+      }
+    }
+  }, [currentPath, currentUser, isAuthChecking]);
 
   const handleLoginSuccess = (user: UserAccount, _token: string) => {
     setCurrentUser(user);
@@ -107,6 +125,7 @@ export default function App() {
     }
     localStorage.removeItem('sentinel_auth_token');
     setCurrentUser(null);
+    navigateTo('/auth');
   };
 
   const handleUnblockClient = async (clientId: string) => {
@@ -153,30 +172,52 @@ export default function App() {
   if (currentPath === '/' || currentPath === '/landing') {
     return (
       <LandingPage
-        onGetStarted={() => navigateTo('/console')}
-        onGoToSignIn={() => navigateTo('/login')}
-        onGoToDashboard={() => navigateTo('/console')}
+        onGetStarted={() => {
+          if (currentUser) {
+            navigateTo('/console');
+          } else {
+            navigateTo('/auth');
+          }
+        }}
+        onGoToSignIn={() => {
+          if (currentUser) {
+            navigateTo('/console');
+          } else {
+            navigateTo('/auth');
+          }
+        }}
+        onGoToDashboard={() => {
+          if (currentUser) {
+            navigateTo('/console');
+          } else {
+            navigateTo('/auth');
+          }
+        }}
       />
     );
   }
 
-  // Route: "/login"
-  if (currentPath === '/login') {
+  // Route: "/auth", "/login", "/register" -> Unified Professional Authentication Interface
+  if (currentPath === '/auth' || currentPath === '/login' || currentPath === '/register') {
+    // If already authenticated, redirect straight to /console
+    if (currentUser) {
+      navigateTo('/console');
+    }
     return (
-      <LoginPage
-        onLoginSuccess={handleLoginSuccess}
-        onGoToRegister={() => navigateTo('/register')}
+      <AuthPage
+        initialMode={currentPath === '/register' ? 'signup' : 'signin'}
+        onAuthSuccess={handleLoginSuccess}
         onBackToHome={() => navigateTo('/')}
       />
     );
   }
 
-  // Route: "/register"
-  if (currentPath === '/register') {
+  // Route: "/console" Protected Route check
+  if (!currentUser && !isAuthChecking) {
     return (
-      <RegisterPage
-        onRegisterSuccess={handleLoginSuccess}
-        onGoToLogin={() => navigateTo('/login')}
+      <AuthPage
+        initialMode="signin"
+        onAuthSuccess={handleLoginSuccess}
         onBackToHome={() => navigateTo('/')}
       />
     );
@@ -199,7 +240,7 @@ export default function App() {
         currentUser={currentUser}
         onSignOut={handleSignOut}
         onNavigateToLanding={() => navigateTo('/')}
-        onNavigateToLogin={() => navigateTo('/login')}
+        onNavigateToLogin={() => navigateTo('/auth')}
       />
 
       {/* Main Content Viewport */}
