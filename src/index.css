@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .font-display {
+    font-family: "BubbledotICG-FinePos", "Geist Pixel Circle", "Courier New", monospace;
+    letter-spacing: -0.02em;
+  }
+}
+
+.bg-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  z-index: 0;
+}
+

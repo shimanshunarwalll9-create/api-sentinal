@@ -1,0 +1,6 @@
+{
+  "name": "API Sentinel - Real-Time API Security & Abuse Detection",
+  "description": "Intelligent behavior-based API security proxy with explainable risk scoring, adaptive rate limiting, automated temporary blocking, and AI incident analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
