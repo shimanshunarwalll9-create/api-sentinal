@@ -179,9 +179,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <div className="hidden md:flex items-center gap-3">
               <button
                 onClick={onGoToDashboard}
-                className="px-4 py-2 rounded-md bg-white/10 hover:bg-white/20 text-white text-xs font-semibold tracking-wide uppercase transition-colors border border-white/20"
+                className="px-4 py-2 rounded-md bg-white/10 hover:bg-white/20 text-white text-xs font-semibold tracking-wide uppercase transition-colors border border-white/20 cursor-pointer"
               >
-                Enter SOC Console
+                Security Console
               </button>
             </div>
 
@@ -226,15 +226,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               <div className="pt-6 border-t border-white/10 flex flex-col gap-3">
                 <button
                   onClick={onGetStarted}
-                  className="w-full py-3 bg-white text-black font-bold rounded-lg text-center"
+                  className="w-full py-3 bg-white text-black font-bold rounded-lg text-center cursor-pointer"
                 >
                   Get Started
                 </button>
                 <button
                   onClick={onGoToDashboard}
-                  className="w-full py-3 bg-white/10 border border-white/20 text-white font-bold rounded-lg text-center"
+                  className="w-full py-3 bg-white/10 border border-white/20 text-white font-bold rounded-lg text-center cursor-pointer"
                 >
-                  Enter SOC Console
+                  Security Console
                 </button>
               </div>
             </div>
@@ -421,11 +421,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               API Sentinel © 2026 · Real-Time API Security & Distributed Abuse Pattern Recognition
             </div>
             <div className="flex items-center gap-6">
-              <button onClick={onGoToSignIn} className="hover:text-white">
+              <button onClick={onGoToSignIn} className="hover:text-white cursor-pointer">
                 Operator Sign In
               </button>
-              <button onClick={onGoToDashboard} className="hover:text-white">
-                SOC Console
+              <button onClick={onGoToDashboard} className="hover:text-white cursor-pointer">
+                Security Console
               </button>
             </div>
           </div>

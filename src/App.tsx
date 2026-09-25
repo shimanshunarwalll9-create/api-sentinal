@@ -18,9 +18,38 @@ import { BackendApiTab } from './components/BackendApiTab';
 import type { ThreatEvent, UserAccount } from './types/sentinel';
 
 export default function App() {
+  // Client-side URL pathname sync
+  const getInitialPath = () => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+      return path;
+    }
+    return '/';
+  };
+
+  const [currentPath, setCurrentPath] = useState<string>(getInitialPath);
   const [activeTab, setActiveTab] = useState<string>('overview');
   const [selectedThreat, setSelectedThreat] = useState<ThreatEvent | null>(null);
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+
+  // Sync browser back/forward buttons (popstate)
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+      setCurrentPath(path);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigateTo = (path: string) => {
+    if (typeof window !== 'undefined') {
+      if (window.location.pathname !== path) {
+        window.history.pushState({}, '', path);
+      }
+      setCurrentPath(path);
+    }
+  };
 
   const {
     overview,
@@ -57,9 +86,10 @@ export default function App() {
     }
   }, [setActiveRole]);
 
-  const handleLoginSuccess = (user: UserAccount, token: string) => {
+  const handleLoginSuccess = (user: UserAccount, _token: string) => {
     setCurrentUser(user);
     setActiveRole(user.role);
+    navigateTo('/console');
     setActiveTab('overview');
   };
 
@@ -117,37 +147,42 @@ export default function App() {
     }
   };
 
-  // Dedicated full-page routes: Landing, Login, Register
-  if (activeTab === 'landing') {
+  // Route 1: "/" (Root URL) -> Public Landing Page
+  // The landing page is the first page for every new visitor.
+  // Do NOT automatically redirect "/" to the Security Console.
+  if (currentPath === '/' || currentPath === '/landing') {
     return (
       <LandingPage
-        onGetStarted={() => setActiveTab('overview')}
-        onGoToSignIn={() => setActiveTab('login')}
-        onGoToDashboard={() => setActiveTab('overview')}
+        onGetStarted={() => navigateTo('/console')}
+        onGoToSignIn={() => navigateTo('/login')}
+        onGoToDashboard={() => navigateTo('/console')}
       />
     );
   }
 
-  if (activeTab === 'login') {
+  // Route: "/login"
+  if (currentPath === '/login') {
     return (
       <LoginPage
         onLoginSuccess={handleLoginSuccess}
-        onGoToRegister={() => setActiveTab('register')}
-        onBackToHome={() => setActiveTab('overview')}
+        onGoToRegister={() => navigateTo('/register')}
+        onBackToHome={() => navigateTo('/')}
       />
     );
   }
 
-  if (activeTab === 'register') {
+  // Route: "/register"
+  if (currentPath === '/register') {
     return (
       <RegisterPage
         onRegisterSuccess={handleLoginSuccess}
-        onGoToLogin={() => setActiveTab('login')}
-        onBackToHome={() => setActiveTab('overview')}
+        onGoToLogin={() => navigateTo('/login')}
+        onBackToHome={() => navigateTo('/')}
       />
     );
   }
 
+  // Route: "/console" (and all subpaths/tabs) -> Existing API Sentinel Security Console/Profile interface.
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
       {/* Top Navbar */}
@@ -163,8 +198,8 @@ export default function App() {
         patternCount={distributedPatterns.length}
         currentUser={currentUser}
         onSignOut={handleSignOut}
-        onNavigateToLanding={() => setActiveTab('landing')}
-        onNavigateToLogin={() => setActiveTab('login')}
+        onNavigateToLanding={() => navigateTo('/')}
+        onNavigateToLogin={() => navigateTo('/login')}
       />
 
       {/* Main Content Viewport */}
@@ -265,10 +300,10 @@ export default function App() {
           <span>API Sentinel — Distributed Abuse Recognition & Adaptive Defense Gateway</span>
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setActiveTab('landing')}
-              className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2"
+              onClick={() => navigateTo('/')}
+              className="text-cyan-400 hover:text-cyan-300 underline underline-offset-2 cursor-pointer"
             >
-              Public Presentation Page
+              Landing Page
             </button>
             <span>·</span>
             <span>College Hackathon MVP</span>
