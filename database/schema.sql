@@ -46,13 +46,13 @@ CREATE TABLE IF NOT EXISTS api_requests (
     latency_ms INTEGER NOT NULL,
     risk_score INTEGER NOT NULL CHECK (risk_score >= 0 AND risk_score <= 100),
     action_enforced VARCHAR(30) NOT NULL CHECK (action_enforced IN ('ALLOW', 'MONITOR', 'RATE_LIMIT', 'TEMPORARY_BLOCK')),
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_api_requests_timestamp ON api_requests(timestamp DESC);
+CREATE INDEX idx_api_requests_created_at ON api_requests(created_at DESC);
 CREATE INDEX idx_api_requests_client_id ON api_requests(client_id);
 CREATE INDEX idx_api_requests_risk_score ON api_requests(risk_score);
-CREATE INDEX idx_api_requests_composite ON api_requests(client_id, timestamp DESC);
+CREATE INDEX idx_api_requests_composite ON api_requests(client_id, created_at DESC);
 
 -- 4. Threat Events Table (Security Incidents & Detections)
 CREATE TABLE IF NOT EXISTS threat_events (
@@ -117,10 +117,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     action VARCHAR(100) NOT NULL,
     target VARCHAR(128),
     details TEXT NOT NULL,
-    timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
+CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at DESC);
 CREATE INDEX idx_audit_logs_actor ON audit_logs(actor);
 
 -- Initial Seed Data
