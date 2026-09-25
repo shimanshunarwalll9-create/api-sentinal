@@ -546,12 +546,8 @@ function calculateRiskScore(
   hist.failedAuthTimestamps = hist.failedAuthTimestamps.filter((t) => now - t <= 60000);
 
   // Record this request
-  hist.requestTimestamps.push(now);
   hist.lastSeen = now;
   hist.endpointCounts[endpoint] = (hist.endpointCounts[endpoint] || 0) + 1;
-  hist.endpointSequence.push(endpoint);
-  if (hist.endpointSequence.length > 10) hist.endpointSequence.shift();
-
   hist.methods[method] = (hist.methods[method] || 0) + 1;
 
   if (statusCode >= 200 && statusCode < 400) {
@@ -614,15 +610,25 @@ function calculateRiskScore(
     reasons.push('High-frequency authentication endpoint hitting pattern');
   }
 
-  // 4. Rule 4: Sudden Behavior Change
+  // 4. Rule 4: Sudden Behavior Change & Repeated Targeting
   let behaviorChangeScore = 0;
   const recent10sCount = hist.requestTimestamps.filter((t) => now - t <= 10000).length;
-  if (recent10sCount >= 10) {
-    behaviorChangeScore = 20;
-    reasons.push(`Sudden velocity surge: ${recent10sCount} requests in 10-second micro-window`);
-  } else if (recent10sCount >= 5 && rpm > 15) {
-    behaviorChangeScore = 11;
+  const repeatedEndpointCount = hist.endpointSequence.filter((p) => p === endpoint).length;
+
+  if (recent10sCount >= 10 || rpm > 20) {
+    behaviorChangeScore += 25;
+    reasons.push(`Rapid request burst: ${recent10sCount} requests in 10-second micro-window`);
+  } else if (recent10sCount >= 5) {
+    behaviorChangeScore += 15;
     reasons.push('Significant deviation from rolling client baseline');
+  }
+
+  if (repeatedEndpointCount >= 8) {
+    behaviorChangeScore += 25;
+    reasons.push(`High-frequency repetitive endpoint hammering: ${repeatedEndpointCount} requests to ${endpoint}`);
+  } else if (repeatedEndpointCount >= 4 && recent10sCount >= 4) {
+    behaviorChangeScore += 15;
+    reasons.push(`Repeated endpoint targeting sequence: ${repeatedEndpointCount} requests`);
   }
 
   const rawScore =
@@ -710,6 +716,12 @@ function sentinelGatewayMiddleware(req: Request, res: Response, next: NextFuncti
   if (account) hist.accounts.add(account);
   if (session) hist.sessions.add(session);
   if (device) hist.devices.add(device);
+
+  // Maintain sliding window request timestamps
+  hist.requestTimestamps = hist.requestTimestamps.filter((t) => now - t <= 60000);
+  hist.requestTimestamps.push(now);
+  hist.endpointSequence.push(req.originalUrl);
+  if (hist.endpointSequence.length > 20) hist.endpointSequence.shift();
 
   // 1. Check if client is in Active Temporary Block
   const blockRecord = blockedClients.get(clientId);
@@ -801,14 +813,14 @@ function sentinelGatewayMiddleware(req: Request, res: Response, next: NextFuncti
       statusCode: 429,
       latencyMs: Date.now() - startTime,
       riskEvaluation: {
-        riskScore: 72,
+        riskScore: 75,
         riskLevel: 'high',
         action: 'RATE_LIMIT',
         breakdown: {
-          requestRateScore: 30,
+          requestRateScore: 35,
           failedAuthScore: 15,
           endpointAnomalyScore: 15,
-          behaviorChangeScore: 12,
+          behaviorChangeScore: 10,
         },
         reasons: [`Rate limit throttle active (${remainingSec}s cooldown)`],
       },
@@ -822,10 +834,89 @@ function sentinelGatewayMiddleware(req: Request, res: Response, next: NextFuncti
 
     res.status(429).json({
       error: 'Too Many Requests',
-      risk_score: 72,
+      risk_score: 75,
       action: 'RATE_LIMIT',
       reason: 'Rate limit applied due to abnormal request velocity',
       retry_after_seconds: remainingSec,
+    });
+    return;
+  }
+
+  // Pre-flight Velocity & Repetitive Request Abuse Evaluation (Trigger immediate 429 or 403 on rapid floods)
+  const recent10sPre = hist.requestTimestamps.filter((t) => now - t <= 10000).length;
+  const recentSameEndpointPre = hist.endpointSequence.filter((p) => p === req.originalUrl).length;
+
+  if (recent10sPre >= 8 || recentSameEndpointPre >= 6) {
+    const rateLimitDurationSec = 30;
+    hist.rateLimitUntil = now + rateLimitDurationSec * 1000;
+    const latencyMs = Date.now() - startTime;
+    const computedRisk = Math.min(100, 60 + recentSameEndpointPre * 5);
+
+    const telemetry: ApiRequestTelemetry = {
+      id: 'req-' + Math.random().toString(36).substring(2, 9),
+      timestamp: new Date().toISOString(),
+      clientId,
+      clientIp,
+      account,
+      session,
+      device,
+      userAgent,
+      method: req.method,
+      endpoint: req.originalUrl,
+      statusCode: 429,
+      latencyMs,
+      riskEvaluation: {
+        riskScore: computedRisk,
+        riskLevel: computedRisk >= 80 ? 'critical' : 'high',
+        action: 'RATE_LIMIT',
+        breakdown: {
+          requestRateScore: 35,
+          failedAuthScore: 0,
+          endpointAnomalyScore: 15,
+          behaviorChangeScore: computedRisk - 50,
+        },
+        reasons: [
+          `Rapid request burst detected (${recent10sPre} requests in 10s)`,
+          `Excessive repetitive targeting of ${req.originalUrl}`,
+        ],
+      },
+      blocked: false,
+      rateLimited: true,
+    };
+
+    telemetryLogs.unshift(telemetry);
+    if (telemetryLogs.length > 500) telemetryLogs.pop();
+    broadcastSecurityEvent({ type: 'telemetry', data: telemetry });
+
+    // Persist to Supabase public.api_requests using created_at
+    if (supabaseClient) {
+      supabaseClient
+        .from('api_requests')
+        .insert([
+          {
+            ip_address: String(clientIp).split(',')[0].trim(),
+            user_id: account ? String(account) : null,
+            session_id: session ? String(session) : null,
+            endpoint: req.originalUrl,
+            method: req.method,
+            status_code: 429,
+            response_time: latencyMs,
+          },
+        ])
+        .then(() => {});
+    }
+
+    res.setHeader('X-Sentinel-Risk-Score', computedRisk.toString());
+    res.setHeader('X-Sentinel-Risk-Level', computedRisk >= 80 ? 'critical' : 'high');
+    res.setHeader('X-Sentinel-Action', 'RATE_LIMIT');
+    res.setHeader('Retry-After', rateLimitDurationSec.toString());
+
+    res.status(429).json({
+      error: 'Rate limit exceeded',
+      risk_score: computedRisk,
+      action: 'RATE_LIMIT',
+      reason: `Rapid abuse velocity detected (${recent10sPre} requests in 10s)`,
+      retry_after_seconds: rateLimitDurationSec,
     });
     return;
   }
