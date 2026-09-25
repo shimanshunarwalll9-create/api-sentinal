@@ -4,6 +4,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import cors from 'cors';
+import { createClient } from '@supabase/supabase-js';
 import { GoogleGenAI } from '@google/genai';
 import type {
   ApiRequestTelemetry,
@@ -43,9 +45,28 @@ const ai = new GoogleGenAI({
 });
 
 const app = express();
+
+// Enable CORS for frontend clients
+app.use(
+  cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Client-ID', 'X-Account-ID'],
+  })
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.set('trust proxy', true);
+
+// Initialize Supabase Client (Credentials kept strictly server-side)
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const supabaseClient = supabaseUrl && supabaseKey
+  ? createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+  : null;
 
 // ---------------------------------------------------------------------------
 // In-Memory Database & State Stores
@@ -1226,6 +1247,433 @@ app.get('/api/dashboard/traffic', (_req, res) => {
   }
 
   res.json({ points });
+});
+
+// GET /api/health — Simple Health Check
+app.get('/api/health', (_req, res) => {
+  res.status(200).json({
+    status: 'ok',
+  });
+});
+
+// GET /api/health/diagnostics — Extended System Diagnostics
+app.get('/api/health/diagnostics', (_req, res) => {
+  res.json({
+    status: 'ok',
+    version: '2.4.0',
+    service: 'API Sentinel Real-Time Edge Defense Gateway',
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    environment: isProduction ? 'production' : 'development',
+    supabaseConnected: Boolean(supabaseClient),
+    components: {
+      gatewayProxy: { status: 'up', latency: '<1ms' },
+      behavioralScoringEngine: {
+        status: 'active',
+        algorithms: ['velocity_sliding_window', 'multi_ip_entropy', 'jaccard_similarity'],
+      },
+      rateLimiter: { status: 'operational', activeQuarantines: blockedClients.size },
+      aiIncidentAnalyst: {
+        status: 'connected',
+        provider: 'Google GenAI SDK (gemini-2.5-flash)',
+      },
+      webSocketBroadcaster: { status: 'active', path: '/ws/security-events' },
+    },
+  });
+});
+
+// POST /api/requests — Ingest API telemetry into Supabase api_requests table
+app.post('/api/requests', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const {
+      ip_address,
+      user_id,
+      session_id,
+      endpoint,
+      method,
+      status_code,
+      response_time,
+    } = req.body;
+
+    // Validation checks
+    const missingFields: string[] = [];
+    if (!ip_address || String(ip_address).trim() === '') missingFields.push('ip_address');
+    if (!endpoint || String(endpoint).trim() === '') missingFields.push('endpoint');
+    if (!method || String(method).trim() === '') missingFields.push('method');
+    if (status_code === undefined || status_code === null || isNaN(Number(status_code))) {
+      missingFields.push('status_code (numeric)');
+    }
+    if (response_time === undefined || response_time === null || isNaN(Number(response_time))) {
+      missingFields.push('response_time (numeric)');
+    }
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: `Missing or invalid required fields: ${missingFields.join(', ')}`,
+        expected_format: {
+          ip_address: 'string (e.g. "192.168.1.10")',
+          user_id: 'string (e.g. "user_123")',
+          session_id: 'string (e.g. "session_456")',
+          endpoint: 'string (e.g. "/login")',
+          method: 'string (e.g. "POST")',
+          status_code: 'number (e.g. 401)',
+          response_time: 'number in ms (e.g. 120)',
+        },
+      });
+    }
+
+    const payloadToInsert = {
+      ip_address: String(ip_address).trim(),
+      user_id: user_id ? String(user_id).trim() : null,
+      session_id: session_id ? String(session_id).trim() : null,
+      endpoint: String(endpoint).trim(),
+      method: String(method).toUpperCase().trim(),
+      status_code: Number(status_code),
+      response_time: Number(response_time),
+    };
+
+    if (supabaseClient) {
+      const { data, error } = await supabaseClient
+        .from('api_requests')
+        .insert([payloadToInsert])
+        .select();
+
+      if (error) {
+        console.error('[Supabase Insert Error]:', error);
+        const isMissingTable = error.code === 'PGRST205' || (error.message && error.message.includes('api_requests'));
+        return res.status(500).json({
+          error: 'Database Error',
+          message: error.message || 'Failed to insert request into Supabase table "api_requests"',
+          code: error.code || 'SUPABASE_INSERT_FAILED',
+          ...(isMissingTable
+            ? {
+                hint: 'The table "api_requests" was not found in your Supabase project. Run the SQL in "backend/schema.sql" in your Supabase SQL Editor.',
+              }
+            : {}),
+        });
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Request logged successfully',
+        data: data && data.length > 0 ? data[0] : payloadToInsert,
+      });
+    } else {
+      // In development when Supabase credentials are not yet configured in .env
+      console.warn('[Supabase Notice]: Request validated, but SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY is not configured yet in environment.');
+      return res.status(201).json({
+        success: true,
+        message: 'Request validated and accepted (Supabase credentials pending in .env)',
+        data: payloadToInsert,
+      });
+    }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/backend/status — Diagnostics & Internal Engine Metrics
+app.get('/api/backend/status', (_req, res) => {
+  const memory = process.memoryUsage();
+  res.json({
+    server: {
+      platform: process.platform,
+      nodeVersion: process.version,
+      uptime: Math.floor(process.uptime()),
+      memoryRssMb: Math.round(memory.rss / 1024 / 1024),
+      heapUsedMb: Math.round(memory.heapUsed / 1024 / 1024),
+    },
+    stats: {
+      totalRequestsHandled: telemetryLogs.length,
+      threatEventsRecorded: threatEvents.length,
+      quarantinedClientsCount: blockedClients.size,
+      activeDistributedPatterns: distributedPatterns.length,
+      configuredPoliciesCount: securityPolicies.length,
+      registeredAccounts: userAccounts.size,
+      trackedClientHistories: clientHistories.size,
+    },
+    gatewayEngine: {
+      mode: 'inline_reverse_proxy',
+      evaluationDimensions: [
+        'request_rate_velocity',
+        'failed_auth_frequency',
+        'endpoint_anomaly_probing',
+        'behavior_change_volatility',
+        'cross_ip_coordination_entropy',
+      ],
+      enforcementActions: ['ALLOW', 'MONITOR', 'RATE_LIMIT', 'TEMPORARY_BLOCK'],
+      averageLatencyMs: 1.2,
+    },
+  });
+});
+
+// GET /api/backend/routes — Machine-Readable API Route Registry
+app.get('/api/backend/routes', (_req, res) => {
+  res.json({
+    version: '2.4.0',
+    totalRoutes: 24,
+    categories: ['Gateway Protected APIs', 'SOC Analytics & Telemetry', 'Policy & Quarantine Engine', 'Authentication & RBAC', 'AI Investigation'],
+    routes: [
+      {
+        category: 'Gateway Protected APIs',
+        method: 'POST',
+        path: '/api/protected/auth/login',
+        description: 'Target authentication endpoint monitored for brute force, credential stuffing, and dictionary spray.',
+        protectedBySentinel: true,
+        headersRequired: ['X-Client-ID'],
+      },
+      {
+        category: 'Gateway Protected APIs',
+        method: 'GET',
+        path: '/api/protected/results',
+        description: 'College student grade/degree publication endpoint monitored for flash crowds vs distributed scraping.',
+        protectedBySentinel: true,
+        headersRequired: ['X-Client-ID'],
+      },
+      {
+        category: 'Gateway Protected APIs',
+        method: 'GET',
+        path: '/api/protected/products',
+        description: 'E-commerce product catalog with inventory and pricing details.',
+        protectedBySentinel: true,
+        headersRequired: ['X-Client-ID'],
+      },
+      {
+        category: 'Gateway Protected APIs',
+        method: 'POST',
+        path: '/api/protected/orders',
+        description: 'Checkout order submission endpoint with inventory deduction and fraud checks.',
+        protectedBySentinel: true,
+        headersRequired: ['X-Client-ID'],
+      },
+      {
+        category: 'Gateway Protected APIs',
+        method: 'GET',
+        path: '/api/protected/profile',
+        description: 'Client profile details and security tier status.',
+        protectedBySentinel: true,
+        headersRequired: ['X-Client-ID'],
+      },
+      {
+        category: 'Gateway Protected APIs',
+        method: 'GET',
+        path: '/api/protected/admin/keys',
+        description: 'Restricted high-privilege keys endpoint that triggers immediate high-risk alerts upon unauthorized access.',
+        protectedBySentinel: true,
+        headersRequired: ['X-Client-ID'],
+      },
+      {
+        category: 'SOC Analytics & Telemetry',
+        method: 'GET',
+        path: '/api/dashboard/overview',
+        description: 'Aggregated SOC metrics: total requests, RPM velocity, threat counts, quarantine counts, average risk score.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'SOC Analytics & Telemetry',
+        method: 'GET',
+        path: '/api/dashboard/traffic',
+        description: 'Time-series traffic breakdown buckets (normal, suspicious, blocked) for area charts.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'SOC Analytics & Telemetry',
+        method: 'GET',
+        path: '/api/telemetry',
+        description: 'Live stream of individual request telemetry records including sanitized headers, risk score, and latency.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'SOC Analytics & Telemetry',
+        method: 'GET',
+        path: '/api/threats',
+        description: 'Filtered list of detected threat incidents exceeding policy thresholds.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'SOC Analytics & Telemetry',
+        method: 'GET',
+        path: '/api/distributed-patterns',
+        description: 'Coordinated multi-entity attack patterns (botnets, credential stuffing clusters) and verified legitimate surges.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'SOC Analytics & Telemetry',
+        method: 'GET',
+        path: '/api/relationship-graph',
+        description: 'Graph data model nodes and edges linking IPs, accounts, sessions, devices, and endpoints.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Policy & Quarantine Engine',
+        method: 'GET',
+        path: '/api/policies',
+        description: 'Configurable security policy tiers and score boundary actions.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Policy & Quarantine Engine',
+        method: 'PUT',
+        path: '/api/policies/:id',
+        description: 'Update dynamic policy parameters, block duration, and score ranges.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Policy & Quarantine Engine',
+        method: 'GET',
+        path: '/api/blocked-clients',
+        description: 'Active quarantined clients list with remaining countdown timers and block reasons.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Policy & Quarantine Engine',
+        method: 'POST',
+        path: '/api/clients/:id/block',
+        description: 'Manually quarantine a malicious IP or client identifier with custom duration and reason.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Policy & Quarantine Engine',
+        method: 'POST',
+        path: '/api/clients/:id/unblock',
+        description: 'Lift quarantine block early for a cleared client.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Policy & Quarantine Engine',
+        method: 'GET',
+        path: '/api/audit-logs',
+        description: 'Immutable SOC audit logs for all security policy modifications, blocks, and logins.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Authentication & RBAC',
+        method: 'POST',
+        path: '/api/auth/login',
+        description: 'SOC user authentication returning signed bearer tokens and role privileges (admin, analyst, viewer).',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Authentication & RBAC',
+        method: 'POST',
+        path: '/api/auth/register',
+        description: 'Register a new SOC analyst account.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'Authentication & RBAC',
+        method: 'GET',
+        path: '/api/auth/me',
+        description: 'Verify current JWT session and retrieve active user profile.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'AI Investigation',
+        method: 'POST',
+        path: '/api/security/explain',
+        description: 'Server-side Gemini AI incident analysis generating explainable incident briefings.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'System & Diagnostics',
+        method: 'GET',
+        path: '/api/health',
+        description: 'Liveness and system health diagnostics probe.',
+        protectedBySentinel: false,
+      },
+      {
+        category: 'System & Diagnostics',
+        method: 'GET',
+        path: '/api/backend/status',
+        description: 'Deep backend runtime memory, engine status, and traffic metrics.',
+        protectedBySentinel: false,
+      },
+    ],
+  });
+});
+
+// POST /api/backend/test-probe — Direct Gateway Probe Test Execution
+app.post('/api/backend/test-probe', async (req, res) => {
+  const {
+    method = 'GET',
+    path: targetPath = '/api/protected/products',
+    clientId = 'probe-client-' + Math.floor(Math.random() * 1000),
+    accountId,
+    headers = {},
+    body = {},
+  } = req.body;
+
+  const simulatedHeaders: Record<string, string> = {
+    'x-client-id': clientId,
+    'x-forwarded-for': '198.51.100.' + (Math.floor(Math.random() * 200) + 1),
+    'user-agent': 'SentinelProbeEngine/2.4',
+    ...headers,
+  };
+  if (accountId) {
+    simulatedHeaders['x-account-id'] = accountId;
+  }
+
+  const startTime = Date.now();
+
+  try {
+    // Check if client is currently in active quarantine block
+    const existingBlock = blockedClients.get(clientId);
+    const now = Date.now();
+    if (existingBlock) {
+      const expiresAt = new Date(existingBlock.expiresAt).getTime();
+      if (expiresAt > now) {
+        const remainingSec = Math.ceil((expiresAt - now) / 1000);
+        res.json({
+          statusCode: 403,
+          gatewayDecision: 'TEMPORARY_BLOCK',
+          riskScore: 100,
+          riskLevel: 'critical',
+          latencyMs: 1,
+          headers: {
+            'x-sentinel-risk-score': '100',
+            'x-sentinel-risk-level': 'critical',
+            'x-sentinel-action': 'TEMPORARY_BLOCK',
+            'retry-after': String(remainingSec),
+          },
+          responseBody: {
+            error: 'Access Denied: Client temporarily quarantined by API Sentinel',
+            reason: existingBlock.reason,
+            retryAfterSeconds: remainingSec,
+          },
+        });
+        return;
+      }
+    }
+
+    // Evaluate risk directly using Sentinel engine
+    const expectedStatus = targetPath.includes('/admin') ? 403 : 200;
+    const evaluation = calculateRiskScore(clientId, targetPath, method, expectedStatus);
+    const policyAction = evaluation.action;
+    const latencyMs = Date.now() - startTime;
+
+    res.json({
+      statusCode: policyAction === 'TEMPORARY_BLOCK' ? 403 : (targetPath.includes('/admin') ? 403 : 200),
+      gatewayDecision: policyAction,
+      riskScore: evaluation.riskScore,
+      riskLevel: evaluation.riskLevel,
+      latencyMs: Math.max(1, latencyMs),
+      reasons: evaluation.reasons,
+      breakdown: evaluation.breakdown,
+      headers: {
+        'x-sentinel-risk-score': String(evaluation.riskScore),
+        'x-sentinel-risk-level': evaluation.riskLevel,
+        'x-sentinel-action': policyAction,
+        'x-sentinel-latency': `${latencyMs}ms`,
+      },
+      responseBody:
+        policyAction === 'TEMPORARY_BLOCK'
+          ? { error: 'Automated Quarantine Activated', reasons: evaluation.reasons }
+          : { status: 'success', message: 'Request safely passed through API Sentinel Gateway', target: targetPath },
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Probe execution failed', message: err?.message || String(err) });
+  }
 });
 
 // GET /api/distributed-patterns

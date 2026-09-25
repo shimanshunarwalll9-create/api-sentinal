@@ -14,6 +14,7 @@ import { LoginPage } from './components/LoginPage';
 import { RegisterPage } from './components/RegisterPage';
 import { DistributedPatternsTab } from './components/DistributedPatternsTab';
 import { RelationshipGraphTab } from './components/RelationshipGraphTab';
+import { BackendApiTab } from './components/BackendApiTab';
 import type { ThreatEvent, UserAccount } from './types/sentinel';
 
 export default function App() {
@@ -228,6 +229,13 @@ export default function App() {
             onRefreshAll={refreshAll}
             onUnblockClient={handleUnblockClient}
             onManualBlockClient={handleManualBlockClient}
+          />
+        )}
+
+        {activeTab === 'backend' && (
+          <BackendApiTab
+            activeRole={activeRole}
+            onRefreshAll={refreshAll}
           />
         )}
 

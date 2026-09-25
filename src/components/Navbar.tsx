@@ -8,6 +8,7 @@ import {
   LogIn,
   ExternalLink,
   User,
+  Server,
 } from 'lucide-react';
 import type { UserRole, UserAccount } from '../types/sentinel';
 
@@ -54,6 +55,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'simulator', label: 'Traffic Simulator' },
     { id: 'policies', label: 'Policy Engine' },
     { id: 'blocked', label: `Blocked Clients ${blockedCount > 0 ? `(${blockedCount})` : ''}` },
+    { id: 'backend', label: 'Backend API', icon: Server },
     { id: 'store', label: 'Protected Store' },
     { id: 'audit', label: 'Audit Trail' },
   ];
