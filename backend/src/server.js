@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import healthRouter from './routes/health.js';
 import requestsRouter from './routes/requests.js';
+import protectedRouter from './routes/protected.js';
 
 // Load environment variables from .env file
 dotenv.config();
@@ -15,7 +16,7 @@ app.use(
   cors({
     origin: '*', // Allow all origins for development, can be restricted to frontend origin in production
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Client-ID'],
   })
 );
 
@@ -33,6 +34,7 @@ app.use((req, _res, next) => {
 // Mount API routes
 app.use('/api/health', healthRouter);
 app.use('/api/requests', requestsRouter);
+app.use('/api/protected', protectedRouter);
 
 // Root greeting route
 app.get('/', (_req, res) => {
@@ -43,6 +45,7 @@ app.get('/', (_req, res) => {
     endpoints: {
       health: 'GET /api/health',
       requests: 'POST /api/requests',
+      protected: 'POST /api/protected/*',
     },
   });
 });

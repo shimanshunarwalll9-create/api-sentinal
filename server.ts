@@ -59,9 +59,9 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.set('trust proxy', true);
 
-// Initialize Supabase Client (Credentials kept strictly server-side)
+// Initialize Supabase Client (Credentials kept strictly server-side - Least Privilege Architecture)
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabaseClient = supabaseUrl && supabaseKey
   ? createClient(supabaseUrl, supabaseKey, {
       auth: { persistSession: false, autoRefreshToken: false },
@@ -902,6 +902,28 @@ function sentinelGatewayMiddleware(req: Request, res: Response, next: NextFuncti
     if (telemetryLogs.length > 500) telemetryLogs.pop();
     broadcastSecurityEvent({ type: 'telemetry', data: telemetry });
 
+    // Non-blocking persistent ingestion to Supabase public.api_requests using created_at
+    if (supabaseClient) {
+      supabaseClient
+        .from('api_requests')
+        .insert([
+          {
+            ip_address: String(clientIp).split(',')[0].trim(),
+            user_id: account ? String(account) : null,
+            session_id: session ? String(session) : null,
+            endpoint: req.originalUrl,
+            method: req.method,
+            status_code: statusCode,
+            response_time: latencyMs,
+          },
+        ])
+        .then(({ error }: { error: any }) => {
+          if (error && error.code !== 'PGRST205') {
+            console.warn('[Supabase Telemetry Notice]:', error.message);
+          }
+        });
+    }
+
     if (evaluation.riskScore >= 30) {
       const threat: ThreatEvent = {
         id: 'threat-' + Math.random().toString(36).substring(2, 9),
@@ -1155,6 +1177,18 @@ protectedRouter.get('/admin/keys', (_req, res) => {
   res.status(403).json({ error: 'Access denied: Administrative privileges required' });
 });
 
+// Wildcard POST handler for any custom protected routes: POST /api/protected/*
+protectedRouter.post('/*', (req, res) => {
+  const subPath = (req.params as any)[0] || '';
+  res.json({
+    status: 'success',
+    path: `/api/protected/${subPath}`,
+    message: 'Protected API request routed and inspected successfully through API Sentinel Gateway',
+    timestamp: new Date().toISOString(),
+    payloadReceived: req.body || null,
+  });
+});
+
 app.use('/api/protected', protectedRouter);
 
 // ---------------------------------------------------------------------------
@@ -1162,15 +1196,39 @@ app.use('/api/protected', protectedRouter);
 // ---------------------------------------------------------------------------
 
 // GET /api/dashboard/overview
-app.get('/api/dashboard/overview', (_req, res) => {
+app.get('/api/dashboard/overview', async (_req, res) => {
   const now = Date.now();
   const pastMinute = now - 60000;
   const recentReqs = telemetryLogs.filter(
     (t) => new Date(t.timestamp).getTime() >= pastMinute
   );
 
-  const totalReqs = telemetryLogs.length;
-  const requestsPerMinute = recentReqs.length;
+  let totalReqs = telemetryLogs.length;
+  let requestsPerMinute = recentReqs.length;
+
+  // If Supabase is connected, attempt to fetch real count from public.api_requests using created_at
+  if (supabaseClient) {
+    try {
+      const oneMinuteAgoIso = new Date(pastMinute).toISOString();
+      const [countResult, rpmResult] = await Promise.all([
+        supabaseClient.from('api_requests').select('*', { count: 'exact', head: true }),
+        supabaseClient
+          .from('api_requests')
+          .select('*', { count: 'exact', head: true })
+          .gte('created_at', oneMinuteAgoIso),
+      ]);
+
+      if (countResult && typeof countResult.count === 'number' && countResult.count > 0) {
+        totalReqs = Math.max(totalReqs, countResult.count);
+      }
+      if (rpmResult && typeof rpmResult.count === 'number') {
+        requestsPerMinute = Math.max(requestsPerMinute, rpmResult.count);
+      }
+    } catch {
+      // Gracefully fall back to real-time memory counts
+    }
+  }
+
   const threatsDetected = threatEvents.length;
   const blockedClientsCount = blockedClients.size;
   const potentialCoordinatedPatterns = distributedPatterns.length;
@@ -1280,6 +1338,50 @@ app.get('/api/health/diagnostics', (_req, res) => {
       webSocketBroadcaster: { status: 'active', path: '/ws/security-events' },
     },
   });
+});
+
+// GET /api/requests — Retrieve recent telemetry logs ordered by created_at DESC
+app.get('/api/requests', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (supabaseClient) {
+      const limit = Math.min(Number(req.query.limit) || 50, 100);
+      const { data, error } = await supabaseClient
+        .from('api_requests')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (error) {
+        return res.status(500).json({
+          error: 'Database Error',
+          message: error.message,
+          code: error.code,
+        });
+      }
+
+      return res.json({
+        success: true,
+        count: data ? data.length : 0,
+        data: data || [],
+      });
+    }
+
+    return res.json({
+      success: true,
+      count: telemetryLogs.length,
+      data: telemetryLogs.slice(0, 50).map((t) => ({
+        id: t.id,
+        ip_address: t.clientIp,
+        endpoint: t.endpoint,
+        method: t.method,
+        status_code: t.statusCode,
+        response_time: t.latencyMs,
+        created_at: t.timestamp,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 // POST /api/requests — Ingest API telemetry into Supabase api_requests table

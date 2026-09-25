@@ -135,3 +135,32 @@ INSERT INTO security_rules (name, risk_level, min_score, max_score, action, bloc
 ('Aggressive Abuse Throttle', 'high', 60, 79, 'RATE_LIMIT', 30, true, 'HTTP 429 rate limiting applied to rapid request bursts.'),
 ('Critical Threat Quarantine', 'critical', 80, 100, 'TEMPORARY_BLOCK', 60, true, 'Automated 60-second isolation for credential stuffing and attacks.')
 ON CONFLICT DO NOTHING;
+
+-- =============================================================================
+-- 8. Row Level Security & Least-Privilege Role Hardening
+-- =============================================================================
+ALTER TABLE api_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE threat_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE security_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE blocked_clients ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+
+-- Deny public/anonymous/unauthenticated access to all telemetry tables
+REVOKE ALL ON TABLE api_requests FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE threat_events FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE blocked_clients FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE audit_logs FROM PUBLIC, anon, authenticated;
+
+-- Minimum required grants for backend service_role only
+GRANT SELECT, INSERT ON TABLE api_requests TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE threat_events TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE security_rules TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE blocked_clients TO service_role;
+GRANT SELECT, INSERT ON TABLE audit_logs TO service_role;
+
+-- Enforce strict service_role policies
+DROP POLICY IF EXISTS "Service role access on api_requests" ON api_requests;
+CREATE POLICY "Service role access on api_requests"
+    ON api_requests FOR ALL TO service_role
+    USING (true) WITH CHECK (true);
+

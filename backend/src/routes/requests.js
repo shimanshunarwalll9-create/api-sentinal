@@ -3,6 +3,44 @@ import { getSupabaseClient } from '../config/supabase.js';
 
 const router = Router();
 
+// GET /api/requests — Fetch latest telemetry records ordered by created_at
+router.get('/', async (req, res, next) => {
+  try {
+    let supabase;
+    try {
+      supabase = getSupabaseClient();
+    } catch (configErr) {
+      return res.status(500).json({
+        error: 'Configuration Error',
+        message: configErr.message || 'Supabase credentials are not configured.',
+      });
+    }
+
+    const limit = Math.min(Number(req.query.limit) || 50, 100);
+    const { data, error } = await supabase
+      .from('api_requests')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      return res.status(500).json({
+        error: 'Database Error',
+        message: error.message,
+        code: error.code,
+      });
+    }
+
+    return res.json({
+      success: true,
+      count: data ? data.length : 0,
+      data: data || [],
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/requests
 router.post('/', async (req, res, next) => {
   try {

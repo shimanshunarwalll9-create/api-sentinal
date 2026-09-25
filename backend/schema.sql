@@ -18,8 +18,17 @@ CREATE INDEX IF NOT EXISTS idx_api_requests_endpoint ON public.api_requests(endp
 -- Enable Row Level Security (RLS)
 ALTER TABLE public.api_requests ENABLE ROW LEVEL SECURITY;
 
--- Policy allowing service_role full access (service-role key automatically bypasses RLS)
-CREATE POLICY "Service role full access on api_requests"
+-- Revoke all permissions from public/anonymous/authenticated roles (Least-Privilege Principle)
+REVOKE ALL ON TABLE public.api_requests FROM PUBLIC, anon, authenticated;
+
+-- Grant minimal necessary table privileges strictly to service_role (backend server only)
+GRANT SELECT, INSERT ON TABLE public.api_requests TO service_role;
+
+-- Row Level Security Policy: Accessible ONLY by service_role
+DROP POLICY IF EXISTS "Service role access on api_requests" ON public.api_requests;
+DROP POLICY IF EXISTS "Service role full access on api_requests" ON public.api_requests;
+
+CREATE POLICY "Service role access on api_requests"
     ON public.api_requests
     FOR ALL
     TO service_role
