@@ -50,10 +50,50 @@ const app = express();
 app.use(
   cors({
     origin: '*',
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Client-ID', 'X-Account-ID'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'X-Client-ID',
+      'X-Account-ID',
+      'X-Session-ID',
+      'Accept',
+    ],
+    exposedHeaders: [
+      'X-Sentinel-Risk-Score',
+      'X-Sentinel-Risk-Level',
+      'X-Sentinel-Action',
+      'X-Sentinel-Latency',
+      'Retry-After',
+    ],
   })
 );
+
+// URL Normalization Middleware for serverless / Vercel API routing
+app.use((req, _res, next) => {
+  if (req.url && !req.url.startsWith('/api') && !req.url.startsWith('/ws') && !req.url.startsWith('/assets')) {
+    if (
+      req.url.startsWith('/auth') ||
+      req.url.startsWith('/health') ||
+      req.url.startsWith('/dashboard') ||
+      req.url.startsWith('/backend') ||
+      req.url.startsWith('/threats') ||
+      req.url.startsWith('/telemetry') ||
+      req.url.startsWith('/policies') ||
+      req.url.startsWith('/blocked-clients') ||
+      req.url.startsWith('/clients') ||
+      req.url.startsWith('/audit-logs') ||
+      req.url.startsWith('/distributed-patterns') ||
+      req.url.startsWith('/relationship-graph') ||
+      req.url.startsWith('/requests') ||
+      req.url.startsWith('/protected')
+    ) {
+      req.url = '/api' + req.url;
+    }
+  }
+  next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -1185,7 +1225,22 @@ app.post('/api/auth/register', async (req, res) => {
         }
 
         activeAuthTokens.set(sessionToken, newAccount);
-        userAccounts.set(lowerEmail, { account: newAccount, passwordHash: password });
+        // Never store plaintext passwords - passwords are secure in Supabase Auth
+        userAccounts.set(lowerEmail, { account: newAccount, passwordHash: '' });
+
+        // Store non-sensitive profile information in public.profiles if schema table exists
+        try {
+          await supabaseClient.from('profiles').upsert({
+            id: newAccount.id,
+            email: lowerEmail,
+            full_name: fullName,
+            organization: newAccount.organization,
+            role: newAccount.role,
+            updated_at: new Date().toISOString(),
+          });
+        } catch {
+          // Schema-tolerant fallback: profiles table might not be provisioned
+        }
 
         auditLogs.unshift({
           id: 'audit-' + Math.random().toString(36).substring(2, 9),
@@ -2605,7 +2660,14 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('Fatal error starting API Sentinel server:', err);
-  process.exit(1);
-});
+// In standard Node/Docker/Cloud Run environments, start the HTTP & WS server.
+// In Vercel serverless environments, Vercel executes the exported Express app directly.
+if (process.env.VERCEL !== '1' && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
+  startServer().catch((err) => {
+    console.error('Fatal error starting API Sentinel server:', err);
+    process.exit(1);
+  });
+}
+
+export { app };
+export default app;

@@ -14,6 +14,7 @@ import {
   KeyRound,
 } from 'lucide-react';
 import type { UserAccount } from '../types/sentinel';
+import { authService } from '../lib/authService';
 
 interface AuthPageProps {
   initialMode?: 'signin' | 'signup';
@@ -65,24 +66,18 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     setLoading(true);
 
     try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.trim(), password }),
-      });
+      const result = await authService.signIn(email.trim(), password);
 
-      const data = await res.json();
-      if (res.ok && data.token) {
-        localStorage.setItem('sentinel_auth_token', data.token);
+      if (result.success && result.user && result.token) {
         setSuccessMsg('Authentication successful! Routing to Security Console...');
         setTimeout(() => {
-          onAuthSuccess(data.user, data.token);
+          onAuthSuccess(result.user!, result.token!);
         }, 300);
       } else {
-        setErrorMsg(data.error || 'Authentication failed. Please verify credentials.');
+        setErrorMsg(result.error || 'Authentication failed. Please verify credentials.');
       }
-    } catch {
-      setErrorMsg('Network error connecting to Sentinel authentication gateway.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Network error connecting to Sentinel authentication gateway.');
     } finally {
       setLoading(false);
     }
@@ -113,29 +108,23 @@ export const AuthPage: React.FC<AuthPageProps> = ({
     setLoading(true);
 
     try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fullName: fullName.trim(),
-          email: email.trim(),
-          password,
-          organization: organization.trim() || 'Security Operations Center',
-        }),
+      const result = await authService.signUp({
+        fullName: fullName.trim(),
+        email: email.trim(),
+        password,
+        organization: organization.trim() || 'Security Operations Center',
       });
 
-      const data = await res.json();
-      if (res.ok && data.token) {
-        localStorage.setItem('sentinel_auth_token', data.token);
+      if (result.success && result.user && result.token) {
         setSuccessMsg('Account created successfully! Preparing SOC console...');
         setTimeout(() => {
-          onAuthSuccess(data.user, data.token);
+          onAuthSuccess(result.user!, result.token!);
         }, 300);
       } else {
-        setErrorMsg(data.error || 'Failed to create operator account.');
+        setErrorMsg(result.error || 'Failed to create operator account.');
       }
-    } catch {
-      setErrorMsg('Network error connecting to Sentinel authentication gateway.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Network error connecting to Sentinel authentication gateway.');
     } finally {
       setLoading(false);
     }

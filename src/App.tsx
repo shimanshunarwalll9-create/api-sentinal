@@ -15,6 +15,7 @@ import { DistributedPatternsTab } from './components/DistributedPatternsTab';
 import { RelationshipGraphTab } from './components/RelationshipGraphTab';
 import { BackendApiTab } from './components/BackendApiTab';
 import type { ThreatEvent, UserAccount } from './types/sentinel';
+import { authService } from './lib/authService';
 
 export default function App() {
   // Client-side URL pathname sync
@@ -68,31 +69,29 @@ export default function App() {
 
   // Check auth session on startup
   useEffect(() => {
-    const token = localStorage.getItem('sentinel_auth_token');
-    if (token) {
-      fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data && data.user) {
-            setCurrentUser(data.user);
-            setActiveRole(data.user.role);
-          } else {
-            localStorage.removeItem('sentinel_auth_token');
-            setCurrentUser(null);
-          }
-        })
-        .catch(() => {
-          localStorage.removeItem('sentinel_auth_token');
+    let isMounted = true;
+    authService
+      .getCurrentUser()
+      .then((user) => {
+        if (!isMounted) return;
+        if (user) {
+          setCurrentUser(user);
+          setActiveRole(user.role);
+        } else {
           setCurrentUser(null);
-        })
-        .finally(() => {
-          setIsAuthChecking(false);
-        });
-    } else {
-      setIsAuthChecking(false);
-    }
+        }
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        setCurrentUser(null);
+      })
+      .finally(() => {
+        if (isMounted) setIsAuthChecking(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
   }, [setActiveRole]);
 
   // Route guard: Redirect unauthenticated requests to /console to /auth
@@ -112,18 +111,7 @@ export default function App() {
   };
 
   const handleSignOut = async () => {
-    const token = localStorage.getItem('sentinel_auth_token');
-    if (token) {
-      try {
-        await fetch('/api/auth/logout', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${token}` },
-        });
-      } catch (e) {
-        console.error('Logout error:', e);
-      }
-    }
-    localStorage.removeItem('sentinel_auth_token');
+    await authService.signOut();
     setCurrentUser(null);
     navigateTo('/auth');
   };
